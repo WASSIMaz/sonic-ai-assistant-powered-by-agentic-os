@@ -1,0 +1,76 @@
+# nexus_layout.toml — SINGLE SOURCE OF TRUTH for all memory layout constants.
+# build.rs reads this file, computes SCHEMA_HASH, and emits:
+#   src/generated/layout.rs  (Rust constants)
+#   python/nexus/_layout.py  (Python ctypes.Structure definitions)
+# DO NOT edit the [offsets] section manually — build.rs writes it.
+# Changing ANY value here changes SCHEMA_HASH, which forces a rebuild
+# and aborts Python startup with NexusLayoutError if _layout.py is stale.
+
+[schema]
+version = "1.0.0"
+
+[regions]
+immutable_size_bytes   = 67108864   # 64MB — holds 2 generations of WorldModel+MachineProfile
+append_only_size_bytes = 2097152    # 2MB  — observation ring + event_log_buffer
+mutable_size_bytes     = 8388608    # 8MB  — goal_states, agent_registry, token_state, etc.
+compute_size_bytes     = 268435456  # 256MB — capability_matrix + hnsw_index + embedding_cache
+
+[header]
+# 64-byte header at offset 0 of the mmap holds the SCHEMA_HASH.
+# Python reads this at startup and aborts with NexusLayoutError if mismatch.
+size_bytes = 64
+
+[observation_ring]
+slot_count      = 150
+slot_size_bytes = 320   # 256 content + 64 cache-pad — one cache line of separation
+content_bytes   = 256
+cache_pad_bytes = 64
+
+[slabs]
+# Slab A — GoalContract: 256 slots × 3072 bytes
+goal_contract_slots = 256
+goal_contract_bytes = 3072   # next power-of-2 above 2100-2800 byte range
+
+# Slab B — GoalState/SubGoalNode: 512 slots × 1024 bytes
+goal_state_slots = 512
+goal_state_bytes = 1024
+
+# Slab C — ObservationSnapshot: 150 slots × 320 bytes (see observation_ring above)
+observation_slots = 150
+observation_bytes = 320
+
+# Slab D — AtomicU64 counters: 1024 slots × 8 bytes
+atomic_counter_slots = 1024
+atomic_counter_bytes = 8
+
+[embedding]
+dim               = 512
+max_apps          = 1000
+cache_max_entries = 1024   # ~2.1MB total at 2.1KB per entry
+
+[event_log]
+capacity_bytes  = 1048576   # 1MB ring
+avg_event_bytes = 100
+# emergency buffer: 65536 bytes (64KB) at end of append_only region
+emergency_buffer_bytes = 65536
+
+[timeouts]
+sqlite_ready_ms       = 5000   # hard stop if exceeded
+write_lock_timeout_ms = 500    # parking_lot try_write_for
+compute_refresh_min   = 5      # minutes between capability matrix refreshes
+
+[offsets]
+# Computed by build.rs — do not edit manually.
+# All offsets are from the start of their respective mmap region.
+immutable_base    = 0
+append_only_base  = 67108864
+mutable_base      = 69206016
+compute_base      = 77594624
+# Within APPEND_ONLY region:
+observation_ring_offset  = 64     # after 64-byte header
+event_log_offset         = 48064  # after ring (64 + 150*320)
+emergency_buffer_offset  = 2031616  # at end: 2097152 - 65536
+# Within COMPUTE region:
+matrix_offset        = 0
+hnsw_index_offset    = 2097152    # 2MB after matrix
+embedding_cache_offset = 54525952  # 52MB after hnsw base

@@ -1,0 +1,89 @@
+[package]
+name = "nexus-utils"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["NEXUS Team"]
+description = "Core utility primitives for the NEXUS Agentic Operating System - provides atomic types, concurrent data structures, timing utilities, and error handling"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nexus-agentic/nexus"
+keywords = ["concurrency", "atomic", "lock-free", "real-time", "operating-system"]
+categories = ["concurrency", "data-structures", "os"]
+
+[dependencies]
+# Locking primitives - parking_lot provides superior performance to std sync primitives
+parking_lot = { version = "0.12", features = ["deadlock_detection"] }
+
+# Crossbeam for scoped threads and queue primitives
+crossbeam = { version = "0.8", features = ["crossbeam-channel", "crossbeam-queue"] }
+
+# Error handling - thiserror for derive macro, anyhow for ergonomic error propagation
+thiserror = "1.0"
+anyhow = "1.0"
+
+# SmallVec for stack-allocated small vectors (most topics have <4 subscribers)
+smallvec = { version = "1.13", features = ["write", "const_generics", "union"] }
+
+# Stable pointer operations
+stable_deref_trait = "1.2"
+
+# HashBrown for high-performance hash map used in DashMap implementation
+hashbrown = { version = "0.14", features = [] }
+
+# Once cell for lazy initialization
+once_cell = { version = "1.19", features = ["parking_lot"] }
+
+# Num-traits for numeric operations in timing
+num-traits = "0.2"
+
+# cfg-if for conditional compilation
+cfg-if = "1.0"
+
+# Tracing support for debugging
+tracing = { version = "0.1", features = ["attributes"], optional = true }
+
+# Serialize/deserialize support
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+# DashMap for high-performance concurrent map
+dashmap = "6"
+
+[features]
+default = ["tracing", "serde"]
+tracing = ["dep:tracing"]
+serde = ["dep:serde", "hashbrown/serde"]
+
+[dev-dependencies]
+# Testing utilities
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.4"
+quickcheck = "1.0"
+rand = "0.9"
+tokio = { version = "1.35", features = ["full"] }
+tokio-test = "0.4"
+
+# Benchmarks disabled - benchmark files not present
+# [[bench]]
+# name = "atomic_benchmark"
+# harness = false
+#
+# [[bench]]
+# name = "ring_buffer_benchmark"
+# harness = false
+#
+# [[bench]]
+# name = "dash_map_benchmark"
+# harness = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+
+[profile.release-debug]
+inherits = "release"
+debug = true
+
+[profile.bench]
+inherits = "release"
+debug = true

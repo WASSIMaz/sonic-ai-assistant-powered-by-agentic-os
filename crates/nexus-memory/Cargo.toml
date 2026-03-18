@@ -1,0 +1,63 @@
+[package]
+name = "nexus-memory"
+version = "0.1.0"
+edition = "2021"
+description = "TypedBuffer regions and hot-tier knowledge store for NEXUS agentic OS"
+
+[lib]
+name = "nexus_memory"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+
+# Atomic operations
+arc-swap = "1.7"
+parking_lot = "0.12"
+dashmap = "5.5"
+
+# Collections
+lru = "0.12"
+
+# Hashing
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+sha2 = "0.10"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# ANN index
+usearch = "2"
+
+# Python bindings
+pyo3 = { version = "0.21", features = ["extension-module", "abi3-py38"] }
+
+# Utilities
+nexus-utils = { path = "../nexus-utils" }
+
+[build-dependencies]
+sha2 = "0.10"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# Testing utilities
+tempfile = "3"
+criterion = "0.5"
+
+[features]
+default = []
+# Platform-specific features
+unix = []
+windows = []
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true
