@@ -27,14 +27,26 @@ sha2 = "0.10"
 # Database
 rusqlite = { version = "0.31", features = ["bundled"] }
 
-# ANN index
-usearch = "2"
+# ANN index (feature-gated: requires C++ toolchain with SIMD support)
+usearch = { version = "2", optional = true }
 
 # Python bindings
 pyo3 = { version = "0.21", features = ["extension-module", "abi3-py38"] }
 
+# Error handling
+thiserror = "1"
+
+# Platform abstraction
+cfg-if = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Win32_System_Memory", "Win32_Foundation", "Win32_Security"] }
+
 # Utilities
 nexus-utils = { path = "../nexus-utils" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [build-dependencies]
 sha2 = "0.10"
@@ -48,6 +60,8 @@ criterion = "0.5"
 
 [features]
 default = []
+# Enable HNSW ANN index (requires usearch C++ toolchain)
+hnsw = ["dep:usearch"]
 # Platform-specific features
 unix = []
 windows = []

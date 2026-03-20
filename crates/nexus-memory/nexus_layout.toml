@@ -2,10 +2,21 @@
 # build.rs reads this file, computes SCHEMA_HASH, and emits:
 #   src/generated/layout.rs  (Rust constants)
 #   python/nexus/_layout.py  (Python ctypes.Structure definitions)
-# DO NOT edit the [offsets] section manually — build.rs writes it.
-# Changing ANY value here changes SCHEMA_HASH, which forces a rebuild
-# and aborts Python startup with NexusLayoutError if _layout.py is stale.
-
+# DO NOT edit the [offsets]
+# Computed by build.rs — do not edit manually.
+# All offsets are from the start of their respective mmap region.
+immutable_base = 0
+append_only_base = 67108864
+mutable_base = 69206016
+compute_base = 77594624
+# Within APPEND_ONLY region:
+observation_ring_offset = 64
+event_log_offset = 48064
+emergency_buffer_offset = 2031616
+# Within COMPUTE region:
+matrix_offset = 0
+hnsw_index_offset = 2097152
+embedding_cache_offset = 54525952
 [schema]
 version = "1.0.0"
 
