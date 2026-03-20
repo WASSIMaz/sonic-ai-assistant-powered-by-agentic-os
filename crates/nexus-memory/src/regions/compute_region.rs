@@ -31,10 +31,17 @@
 //!   DashMap<u128, [f32; 512]> — xxh3_128 of text → float32 vector.
 //!   LRU eviction at 1024 entries. Backed by lru::LruCache inside DashMap.
 
+use std::mem;
+use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::Arc;
 use crate::allocator::mmap::MmapRegion;
 use crate::error::MmapError;
+use crate::slots::hnsw_index::HnswIndexHandle;
+use crate::generated::layout::{
+    COMPUTE_SIZE, MATRIX_OFFSET, HNSW_INDEX_OFFSET, EMBEDDING_CACHE_OFFSET,
+    EMBEDDING_DIM, EMBEDDING_MAX_APPS,
+};
 
 /// The COMPUTE memory region. No locks — write exclusivity via namespace enforcement.
 pub struct ComputeRegion {
@@ -63,7 +70,16 @@ impl ComputeRegion {
     /// Allocate the COMPUTE mmap and initialize all sub-structures.
     /// Zeros the matrix region, initializes the HNSW index, initializes the embedding cache.
     pub fn new() -> Result<Self, MmapError> {
-        todo!()
+        let mmap = MmapRegion::new(COMPUTE_SIZE, "COMPUTE")?;
+
+        Ok(Self {
+            mmap,
+            matrix_offset: MATRIX_OFFSET,
+            hnsw_index_offset: HNSW_INDEX_OFFSET,
+            embedding_cache_offset: EMBEDDING_CACHE_OFFSET,
+            write_in_progress: AtomicBool::new(false),
+            live_hnsw_ptr: AtomicPtr::new(ptr::null_mut()),
+        })
     }
 
     /// Begin a matrix write operation.
@@ -80,7 +96,16 @@ impl ComputeRegion {
     /// The namespace check in TypedBufferHandle::write_slot() prevents any other
     /// caller from reaching this method. This is not a lock — it is structural.
     pub unsafe fn begin_matrix_write(&self) -> MatrixWriter<'_> {
-        todo!()
+        self.write_in_progress.store(true, Ordering::Release);
+
+        let ptr = self.mmap.as_ptr().add(self.matrix_offset) as *mut f32;
+        let max_bytes = EMBEDDING_MAX_APPS * EMBEDDING_DIM * mem::size_of::<f32>();
+
+        MatrixWriter {
+            region: self,
+            ptr,
+            max_bytes,
+        }
     }
 
     /// Returns a read-only view of the capability matrix as a raw float32 slice.
@@ -88,27 +113,30 @@ impl ComputeRegion {
     /// Returns (ptr, num_rows, embedding_dim) where:
     ///   ptr = mmap base + MATRIX_OFFSET (cast to *const f32)
     ///   num_rows = live_app_count (loaded from MUTABLE_REGION.live_app_count)
-    ///   embedding_dim = MATRIX_EMBEDDING_DIM (512, from nexus_layout.toml)
+    ///   embedding_dim = EMBEDDING_DIM (512, from nexus_layout.toml)
     ///
     /// Python caller: np.frombuffer(mmap[MATRIX_OFFSET:MATRIX_OFFSET+num_rows*512*4])
     ///   .reshape(num_rows, 512) — zero allocation, zero copy.
     ///
     /// Returns None if write_in_progress is true (caller should wait for COMPUTE_WRITE_DONE).
     pub fn matrix_slice(&self, live_app_count: u32) -> Option<(*const f32, usize, usize)> {
-        todo!()
+        if self.write_in_progress.load(Ordering::Acquire) {
+            return None;
+        }
+
+        let ptr = unsafe { self.mmap.as_ptr().add(self.matrix_offset) } as *const f32;
+        Some((ptr, live_app_count as usize, EMBEDDING_DIM))
     }
 
-    /// Returns a mutable reference to the live HNSW index.
+    /// Swap the live HNSW index pointer with a new index.
     ///
     /// # Safety
     /// Only callable from the CPU Worker Pool during a COMPUTE_WRITE window.
-    pub unsafe fn hnsw_index_mut(&self) -> &mut usearch::Index {
-        todo!()
-    }
-
-    /// Returns a shared reference to the live HNSW index for ANN queries.
-    /// Safe to call from any Contextualizer thread outside the write window.
-    pub fn hnsw_index(&self) -> &usearch::Index {
+    /// The old index is returned so the caller can drop it after all readers finish.
+    pub unsafe fn swap_hnsw_index(&self, _new_handle: Arc<HnswIndexHandle>) {
+        // The atomic pointer swap will be implemented when the HNSW index
+        // is wired into the ComputeRegion's lifecycle.
+        // For now, the HnswIndexHandle is managed externally via Arc.
         todo!()
     }
 }
@@ -130,7 +158,15 @@ impl<'a> MatrixWriter<'a> {
     /// # Safety
     /// `data` must point to at least `num_apps * dim * 4` bytes of valid f32 data.
     pub unsafe fn write_rows(&mut self, data: *const f32, num_apps: usize, dim: usize) {
-        todo!()
+        let num_floats = num_apps * dim;
+        let byte_count = num_floats * mem::size_of::<f32>();
+        debug_assert!(
+            byte_count <= self.max_bytes,
+            "write_rows: {} bytes exceeds max_bytes {}",
+            byte_count,
+            self.max_bytes,
+        );
+        ptr::copy_nonoverlapping(data, self.ptr, num_floats);
     }
 }
 
@@ -138,7 +174,7 @@ impl<'a> Drop for MatrixWriter<'a> {
     /// Sets write_in_progress = false.
     /// The caller must publish COMPUTE_WRITE_DONE to the Bus after this drops.
     fn drop(&mut self) {
-        todo!()
+        self.region.write_in_progress.store(false, Ordering::Release);
     }
 }
 

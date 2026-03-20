@@ -177,6 +177,11 @@ pub enum BufferError {
     /// Event record size exceeds buffer capacity.
     #[error("event record too large: {size} bytes exceeds capacity {capacity}")]
     EventTooLarge { size: usize, capacity: usize },
+
+    /// Ring buffer or emergency buffer is completely full.
+    /// The caller must drop this event or wait for the flush thread to drain.
+    #[error("event log buffer full")]
+    Full,
 }
 
 // ============================================================================

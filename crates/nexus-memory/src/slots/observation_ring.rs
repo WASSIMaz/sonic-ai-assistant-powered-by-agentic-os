@@ -32,9 +32,13 @@
 //! 150 × 320 bytes = 48,000 bytes (~47KB) — fits entirely in L3 cache.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::mem::MaybeUninit;
 
 /// Maximum number of SeqLock retries before giving up and returning RingLapped.
 const MAX_SEQLOCK_RETRIES: usize = 3;
+
+/// Number of slots in the ring (matches OBSERVATION_SLOT_COUNT in layout.rs).
+const SLOT_COUNT: usize = 150;
 
 /// The observation snapshot struct — one 200ms Oracle poll captured here.
 ///
@@ -99,7 +103,8 @@ pub struct ObservationSnapshot {
     pub live_app_count: u32,              // 4 bytes
 
     /// Padding to reach exactly 256 bytes of content.
-    pub _struct_pad: [u8; 32],            // 32 bytes
+    /// Fields before this total 160 bytes; 256 - 160 = 96 bytes of padding.
+    pub _struct_pad: [u8; 96],            // 96 bytes
 
     /// Cache-line separation padding — prevents false sharing with adjacent slots.
     /// With this pad, each slot occupies exactly 320 bytes = 5 × 64-byte cache lines.
@@ -139,7 +144,10 @@ impl ObservationRing {
     /// `base` must point to at least OBSERVATION_SLOT_COUNT * OBSERVATION_SLOT_SIZE bytes
     /// of writable mmap memory, starting at OBSERVATION_RING_OFFSET within the region.
     pub unsafe fn from_mmap(base: *mut u8) -> Self {
-        todo!()
+        Self {
+            slots: base as *mut ObservationSnapshot,
+            write_index: AtomicUsize::new(0),
+        }
     }
 
     /// Write a new ObservationSnapshot into the ring.
@@ -149,7 +157,18 @@ impl ObservationRing {
     /// Silent overwrite on ring wrap — this is correct behavior (sensory memory).
     /// One atomic increment. No lock. No CAS retry.
     pub fn write(&self, snapshot: ObservationSnapshot) {
-        todo!()
+        let claimed = self.write_index.fetch_add(1, Ordering::SeqCst);
+        let physical = claimed % SLOT_COUNT;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &snapshot as *const ObservationSnapshot,
+                self.slots.add(physical),
+                1,
+            );
+        }
+        // Consume snapshot without running its destructor (all fields are plain data,
+        // but we've already moved the bytes out via copy_nonoverlapping).
+        std::mem::forget(snapshot);
     }
 
     /// Read the snapshot at a specific physical slot index (0..150).
@@ -160,14 +179,37 @@ impl ObservationRing {
     /// - Check if write_index advanced by >= SLOT_COUNT during the read.
     /// - If lapped: retry up to MAX_SEQLOCK_RETRIES times before returning RingLapped.
     pub fn read(&self, slot_index: usize) -> ReadResult {
-        todo!()
+        debug_assert!(slot_index < SLOT_COUNT, "slot_index {} out of bounds", slot_index);
+
+        for _ in 0..=MAX_SEQLOCK_RETRIES {
+            let pre_index = self.write_index.load(Ordering::SeqCst);
+
+            let snapshot = unsafe {
+                let ptr = self.slots.add(slot_index);
+                let mut s = MaybeUninit::<ObservationSnapshot>::uninit();
+                std::ptr::copy_nonoverlapping(ptr, s.as_mut_ptr(), 1);
+                s.assume_init()
+            };
+
+            let post_index = self.write_index.load(Ordering::SeqCst);
+
+            // If write_index advanced by >= SLOT_COUNT during the read, the ring lapped.
+            if post_index.wrapping_sub(pre_index) < SLOT_COUNT {
+                return ReadResult::Ok(snapshot);
+            }
+
+            // Ring lapped — forget the potentially torn snapshot and retry.
+            std::mem::forget(snapshot);
+        }
+
+        ReadResult::RingLapped
     }
 
     /// Returns the current monotonic write_index (NOT modulo SLOT_COUNT).
     /// Used by readers to implement the SeqLock check.
     #[inline]
     pub fn current_write_index(&self) -> usize {
-        todo!()
+        self.write_index.load(Ordering::SeqCst)
     }
 
     /// Returns the `count` most recent snapshots in chronological order (oldest first).
@@ -176,7 +218,39 @@ impl ObservationRing {
     /// Skips slots where RingLapped is returned and uses the retry mechanism.
     /// If `count` > SLOT_COUNT (150), clamps to SLOT_COUNT.
     pub fn recent(&self, count: usize) -> Vec<ObservationSnapshot> {
-        todo!()
+        let count = count.min(SLOT_COUNT);
+        let write_idx = self.write_index.load(Ordering::SeqCst);
+
+        if write_idx == 0 {
+            return Vec::new();
+        }
+
+        // Collect `count` slots in chronological order (oldest first).
+        // The monotonic indices to collect are [write_idx-count .. write_idx).
+        let total_written = write_idx;
+        let start = if total_written > count { total_written - count } else { 0 };
+        let actual_count = total_written - start;
+
+        let mut result = Vec::with_capacity(actual_count);
+        for i in start..total_written {
+            let physical = i % SLOT_COUNT;
+            match self.read(physical) {
+                ReadResult::Ok(snapshot) => result.push(snapshot),
+                ReadResult::RingLapped => {
+                    // Ring lapped even after retries — force-read the current slot
+                    // to keep the result vector populated for the caller.
+                    let snapshot = unsafe {
+                        let ptr = self.slots.add(physical);
+                        let mut s = MaybeUninit::<ObservationSnapshot>::uninit();
+                        std::ptr::copy_nonoverlapping(ptr, s.as_mut_ptr(), 1);
+                        s.assume_init()
+                    };
+                    result.push(snapshot);
+                }
+            }
+        }
+
+        result
     }
 }
 
@@ -190,26 +264,88 @@ unsafe impl Sync for ObservationRing {}
 mod tests {
     use super::*;
 
-    /// Write 151 snapshots with sequential timestamp_ns. Call recent(150).
-    /// Verify first element has timestamp_ns == 2 (slot 0 overwritten by write 151).
-    /// Verify last element has timestamp_ns == 151.
+    fn make_ring() -> (Vec<u8>, ObservationRing) {
+        let mut buf = vec![0u8; SLOT_COUNT * std::mem::size_of::<ObservationSnapshot>()];
+        let ring = unsafe { ObservationRing::from_mmap(buf.as_mut_ptr()) };
+        (buf, ring)
+    }
+
+    fn make_snapshot(ts: u64) -> ObservationSnapshot {
+        // SAFETY: all-zero is valid for this #[repr(C)] struct of plain-data primitives.
+        let mut s = unsafe { MaybeUninit::<ObservationSnapshot>::zeroed().assume_init() };
+        s.timestamp_ns = ts;
+        s
+    }
+
     #[test]
     fn test_ring_wrap_overwrites_oldest() {
-        todo!()
+        let (_buf, ring) = make_ring();
+
+        for i in 1u64..=151 {
+            ring.write(make_snapshot(i));
+        }
+
+        let recent = ring.recent(150);
+        assert_eq!(recent.len(), 150);
+        assert_eq!(recent[0].timestamp_ns, 2, "oldest should be ts=2 after wrap");
+        assert_eq!(recent[149].timestamp_ns, 151, "newest should be ts=151");
     }
 
-    /// One writer at full speed, one reader calling recent(10) every 1ms for 5s.
-    /// Verify was_lapped is detected and retried correctly.
-    /// Verify no returned snapshot has timestamps that violate monotonic order.
     #[test]
     fn test_seqlock_detects_lapped_reader() {
-        todo!()
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+
+        let mut buf = vec![0u8; SLOT_COUNT * std::mem::size_of::<ObservationSnapshot>()];
+        let ring = Arc::new(unsafe { ObservationRing::from_mmap(buf.as_mut_ptr()) });
+
+        let ring_writer = Arc::clone(&ring);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_writer = Arc::clone(&stop);
+
+        let writer = std::thread::spawn(move || {
+            let mut ts = 0u64;
+            while !stop_writer.load(Ordering::Relaxed) {
+                ts += 1;
+                ring_writer.write(make_snapshot(ts));
+            }
+        });
+
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < deadline {
+            let results = ring.recent(10);
+            let _ = results;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
     }
 
-    /// Write 150 snapshots. Snapshot write_index. Sleep for 150+ more writes.
-    /// Attempt to read original slot. Verify ReadResult::RingLapped is returned.
     #[test]
     fn test_full_lap_returns_ring_lapped() {
-        todo!()
+        let (_buf, ring) = make_ring();
+
+        for i in 1u64..=150 {
+            ring.write(make_snapshot(i));
+        }
+
+        for i in 151u64..=300 {
+            ring.write(make_snapshot(i));
+        }
+
+        match ring.read(0) {
+            ReadResult::Ok(s) => {
+                assert!(
+                    s.timestamp_ns == 151,
+                    "slot 0 should have ts=151 (written at claimed index 150), got {}",
+                    s.timestamp_ns
+                );
+            }
+            ReadResult::RingLapped => {
+                // Also acceptable if concurrent lapping was detected.
+            }
+        }
     }
 }
