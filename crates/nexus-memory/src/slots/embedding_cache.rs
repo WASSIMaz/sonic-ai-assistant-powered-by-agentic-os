@@ -208,7 +208,10 @@ mod tests {
         cache.insert("new_key", test_vector(999.0));
         assert_eq!(cache.len(), CACHE_MAX_ENTRIES);
 
+        // key_0 should be evicted
         assert!(cache.get("key_0").is_none(), "key_0 must be evicted");
+
+        // new_key should be present
         assert!(cache.get("new_key").is_some(), "new_key must be present");
     }
 
@@ -216,6 +219,7 @@ mod tests {
     fn test_lru_promotion_prevents_eviction() {
         let cache = EmbeddingCache::new();
 
+        // Fill to capacity
         for i in 0..CACHE_MAX_ENTRIES {
             cache.insert(&format!("key_{}", i), test_vector(i as f32));
         }
@@ -259,6 +263,7 @@ mod tests {
 
         let cache = Arc::new(EmbeddingCache::new());
 
+        // Pre-populate with some entries
         for i in 0..100 {
             cache.insert(&format!("pre_{}", i), test_vector(i as f32));
         }
@@ -266,7 +271,7 @@ mod tests {
         let mut handles = Vec::new();
 
         // 4 reader threads
-        for _t in 0..4 {
+        for t in 0..4 {
             let c = Arc::clone(&cache);
             handles.push(std::thread::spawn(move || {
                 for i in 0..100 {
@@ -276,10 +281,10 @@ mod tests {
         }
 
         // 2 writer threads
-        for t in 0..2usize {
+        for t in 0..2 {
             let c = Arc::clone(&cache);
             handles.push(std::thread::spawn(move || {
-                for i in 0..100usize {
+                for i in 0..100 {
                     c.insert(&format!("thread_{}_{}", t, i), test_vector((t * 100 + i) as f32));
                 }
             }));
@@ -289,6 +294,7 @@ mod tests {
             h.join().expect("thread must not panic");
         }
 
+        // Cache must still be at or below capacity
         assert!(cache.len() <= CACHE_MAX_ENTRIES,
             "cache must not exceed capacity: got {}", cache.len());
     }

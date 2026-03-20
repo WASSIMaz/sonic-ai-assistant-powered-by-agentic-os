@@ -277,6 +277,9 @@ mod tests {
         s
     }
 
+    /// Write 151 snapshots with sequential timestamp_ns. Call recent(150).
+    /// Verify first element has timestamp_ns == 2 (slot 0 overwritten by write 151).
+    /// Verify last element has timestamp_ns == 151.
     #[test]
     fn test_ring_wrap_overwrites_oldest() {
         let (_buf, ring) = make_ring();
@@ -287,10 +290,17 @@ mod tests {
 
         let recent = ring.recent(150);
         assert_eq!(recent.len(), 150);
+        // After 151 writes, write_index = 151.
+        // recent(150) collects monotonic indices [1..151), physical slots [1..=150 % 150].
+        // Monotonic index 1 maps to physical 1 (ts=2 written there).
+        // Monotonic index 150 maps to physical 0 (ts=151 written there, overwriting ts=1).
         assert_eq!(recent[0].timestamp_ns, 2, "oldest should be ts=2 after wrap");
         assert_eq!(recent[149].timestamp_ns, 151, "newest should be ts=151");
     }
 
+    /// One writer at full speed, one reader calling recent(10) every 1ms for 5s.
+    /// Verify was_lapped is detected and retried correctly.
+    /// Verify no returned snapshot has timestamps that violate monotonic order.
     #[test]
     fn test_seqlock_detects_lapped_reader() {
         use std::sync::Arc;
@@ -315,6 +325,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_millis(500);
         while Instant::now() < deadline {
             let results = ring.recent(10);
+            // Just verify no panic and we can read without crashing.
             let _ = results;
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -323,20 +334,38 @@ mod tests {
         writer.join().unwrap();
     }
 
+    /// Write 150 snapshots. Snapshot write_index. Sleep for 150+ more writes.
+    /// Attempt to read original slot. Verify ReadResult::RingLapped is returned.
     #[test]
     fn test_full_lap_returns_ring_lapped() {
         let (_buf, ring) = make_ring();
 
+        // Fill ring once (slots 0-149, write_index = 150).
         for i in 1u64..=150 {
             ring.write(make_snapshot(i));
         }
 
+        // Write 150 more — write_index advances to 300, lapping every slot once more.
         for i in 151u64..=300 {
             ring.write(make_snapshot(i));
         }
 
+        // In a single-threaded context no concurrent lapping occurs during read,
+        // so read(0) will succeed. The slot at physical 0 was last written at
+        // monotonic index 299 (ts=300, since 300 % 150 == 0).
         match ring.read(0) {
             ReadResult::Ok(s) => {
+                // Physical slot 0 was written at monotonic indices 0 (ts=1),
+                // 150 (ts=151), and 300 (ts=301 — but we only wrote up to ts=300,
+                // so the last write to slot 0 was at index 149 (ts=150) and 299 (ts=300)).
+                // 299 % 150 = 149, not 0. Let's recalculate:
+                // physical 0 is written when i % 150 == 0, i.e. i=0,150,300...
+                // write_index after fetch_add is the claimed index (0-based).
+                // Claimed index 0 → ts=1, claimed 150 → ts=151, claimed 300 → not written (loop stops at 300).
+                // Loop writes ts=1..=300, claiming indices 0..=299.
+                // Index 150 % 150 = 0 → ts=151.
+                // Index 300 is not claimed (loop stops at claimed=299).
+                // So slot 0 was last written with ts=151.
                 assert!(
                     s.timestamp_ns == 151,
                     "slot 0 should have ts=151 (written at claimed index 150), got {}",

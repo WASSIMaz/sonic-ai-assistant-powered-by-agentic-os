@@ -334,7 +334,9 @@ mod tests {
     #[test]
     fn test_event_record_size_is_fixed() {
         let size = std::mem::size_of::<EventRecord>();
+        // EventRecord must have a stable, known size for ring alignment
         assert!(size > 0, "EventRecord must have nonzero size");
+        // Verify it's reasonable (should be around 56-64 bytes)
         assert!(size <= 128, "EventRecord unexpectedly large: {} bytes", size);
     }
 
@@ -342,13 +344,17 @@ mod tests {
     #[should_panic(expected = "EventLogBuffer capacity must be a multiple")]
     fn test_from_mmap_panics_on_misaligned_capacity() {
         let event_size = std::mem::size_of::<EventRecord>();
+        // Pick a capacity that is NOT a multiple of event_size
         let bad_capacity = event_size * 10 + 1;
 
         unsafe {
             let base = alloc_test_buffer(bad_capacity);
             let emergency = alloc_test_buffer(65536);
             let sqlite_ready = Arc::new(AtomicBool::new(true));
+
+            // This MUST panic — the assert! in from_mmap enforces alignment
             let _buf = EventLogBuffer::from_mmap(base, bad_capacity, emergency, sqlite_ready);
+
             dealloc_test_buffer(base, bad_capacity);
             dealloc_test_buffer(emergency, 65536);
         }
@@ -357,7 +363,7 @@ mod tests {
     #[test]
     fn test_from_mmap_succeeds_on_aligned_capacity() {
         let event_size = std::mem::size_of::<EventRecord>();
-        let capacity = event_size * 16;
+        let capacity = event_size * 16; // aligned
 
         unsafe {
             let base = alloc_test_buffer(capacity);
@@ -387,7 +393,7 @@ mod tests {
 
             let event = make_test_event(1, 42);
             let offset = buf.append(&event).expect("append must succeed");
-            assert_eq!(offset, 0);
+            assert_eq!(offset, 0); // first event at logical offset 0
 
             let drained = buf.drain();
             assert_eq!(drained.len(), 1);
@@ -402,7 +408,7 @@ mod tests {
     #[test]
     fn test_ring_wraps_correctly() {
         let event_size = std::mem::size_of::<EventRecord>();
-        let capacity = event_size * 4;
+        let capacity = event_size * 4; // small ring: only 4 slots
 
         unsafe {
             let base = alloc_test_buffer(capacity);
@@ -411,13 +417,16 @@ mod tests {
 
             let buf = EventLogBuffer::from_mmap(base, capacity, emergency, sqlite_ready);
 
+            // Fill the ring
             for i in 0..4u64 {
                 buf.append(&make_test_event(0, i)).expect("append must succeed");
             }
 
+            // Ring is now full — drain everything
             let drained = buf.drain();
             assert_eq!(drained.len(), 4);
 
+            // Now write 4 more — these wrap around
             for i in 10..14u64 {
                 buf.append(&make_test_event(0, i)).expect("append after drain must succeed");
             }
@@ -435,7 +444,7 @@ mod tests {
     #[test]
     fn test_full_ring_returns_error() {
         let event_size = std::mem::size_of::<EventRecord>();
-        let capacity = event_size * 2;
+        let capacity = event_size * 2; // only 2 slots
 
         unsafe {
             let base = alloc_test_buffer(capacity);
@@ -444,9 +453,11 @@ mod tests {
 
             let buf = EventLogBuffer::from_mmap(base, capacity, emergency, sqlite_ready);
 
+            // Fill both slots
             buf.append(&make_test_event(0, 1)).unwrap();
             buf.append(&make_test_event(0, 2)).unwrap();
 
+            // Third append must fail
             let result = buf.append(&make_test_event(0, 3));
             assert!(result.is_err(), "append to full ring must return Err");
 
@@ -463,7 +474,7 @@ mod tests {
         unsafe {
             let base = alloc_test_buffer(capacity);
             let emergency = alloc_test_buffer(65536);
-            let sqlite_ready = Arc::new(AtomicBool::new(false));
+            let sqlite_ready = Arc::new(AtomicBool::new(false)); // NOT ready
 
             let buf = EventLogBuffer::from_mmap(base, capacity, emergency, sqlite_ready.clone());
 
@@ -471,6 +482,7 @@ mod tests {
             let result = buf.append(&event);
             assert!(result.is_ok(), "emergency append must succeed");
 
+            // Now set sqlite_ready and promote
             sqlite_ready.store(true, Ordering::Release);
             let promoted = buf.promote_emergency();
             assert_eq!(promoted.len(), 1);
@@ -484,7 +496,7 @@ mod tests {
     #[test]
     fn test_concurrent_appends() {
         let event_size = std::mem::size_of::<EventRecord>();
-        let capacity = event_size * 1024;
+        let capacity = event_size * 1024; // large ring
 
         unsafe {
             let base = alloc_test_buffer(capacity);
@@ -510,6 +522,7 @@ mod tests {
                 h.join().expect("thread panicked");
             }
 
+            // Should have 200 events total
             let drained = buf.drain();
             assert_eq!(drained.len(), 200, "all 200 concurrent events must be drained");
 

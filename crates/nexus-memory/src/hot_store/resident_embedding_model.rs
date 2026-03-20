@@ -21,7 +21,7 @@
 //! embeddings keyed by xxh3_128(text). The model is only invoked on a cache miss.
 
 use std::sync::{Arc, Mutex};
-use crate::generated::layout::MATRIX_EMBEDDING_DIM;
+use crate::generated::layout::EMBEDDING_DIM;
 
 /// The selected embedding backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,7 +59,7 @@ impl ResidentEmbeddingModel {
     ///
     /// Thread-safe: acquires the inner Mutex for the duration of inference.
     /// Callers should check the EmbeddingCache before calling this.
-    pub fn embed(&self, text: &str) -> Result<[f32; MATRIX_EMBEDDING_DIM], EmbeddingModelError> {
+    pub fn embed(&self, text: &str) -> Result<[f32; EMBEDDING_DIM], EmbeddingModelError> {
         todo!()
     }
 
@@ -67,7 +67,7 @@ impl ResidentEmbeddingModel {
     ///
     /// Batching improves GPU utilization. The CPU Worker Pool uses this
     /// during MachineProfile refresh to embed all app capability descriptions.
-    pub fn embed_batch(&self, texts: &[&str]) -> Result<Vec<[f32; MATRIX_EMBEDDING_DIM]>, EmbeddingModelError> {
+    pub fn embed_batch(&self, texts: &[&str]) -> Result<Vec<[f32; EMBEDDING_DIM]>, EmbeddingModelError> {
         todo!()
     }
 }

@@ -326,6 +326,7 @@ mod tests {
 
         assert_eq!(handle.len(), 3);
 
+        // Search for v0 — should find v0 first (exact match)
         let results = handle.search(&v0, 3).unwrap();
         assert!(!results.is_empty(), "search must return results");
         assert_eq!(results[0].key, 0, "exact match must be first result");

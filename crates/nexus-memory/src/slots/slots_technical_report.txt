@@ -1,0 +1,118 @@
+Let me read the actual uploaded files carefully against the architecture document I extracted earlier.Now I have a complete picture. Here is the honest assessment, file by file.
+
+---
+
+## `world_model.rs` ✅ Aligned
+
+The struct is correct. Six atomic fields, `#[repr(C)]`, padded to 64 bytes. Exactly what the architecture requires for the Rust fast-path read by L2 Watchdog, EnvelopeMonitor, and L1 Monitor without the GIL.
+
+**One gap:** There is no compile-time size assertion. The architecture requires it because `_layout.py` is generated with `WORLD_MODEL_SCALARS_SIZE` baked in. If the struct changes without the assert catching it, Python reads garbage silently. This assert must be added before Phase 2 closes.
+
+---
+
+## `observation_ring.rs` ✅ Aligned
+
+The struct, ring protocol, SeqLock read path, 150-slot design, and 320-byte size assert are all correct.
+
+**One gap:** `live_app_count` in `ObservationSnapshot` is documented as written by the MachineProfile refresh cycle, not by the Oracle. The uploaded file has no comment making this ownership explicit. Anyone reading this code will assume the Oracle writes all fields. The ownership contract must be documented inline — it is architecturally load-bearing.
+
+---
+
+## `event_log_buffer.rs` ✅ Aligned with one structural fix already applied
+
+The uploaded version uses true ring semantics with monotonically incrementing `write_index` and a separate `drain_index`. This is correct and an improvement over the earlier skeleton that did not have `drain_index`.
+
+**One real problem:** The wrap-around handling in `append()` has a logic error. When `phys_offset + event_size > capacity`, it writes to offset 0 instead of the correct wrap-around position. This silently drops the event that was mid-boundary and writes the new event at offset 0, potentially overwriting an existing record. For fixed-size `EventRecord` structs, the correct solution is to ensure events are always aligned so they never straddle the boundary — meaning `capacity` must be a multiple of `size_of::<EventRecord>()`. This must be enforced at construction time.
+
+---
+
+## `goal_states.rs` ✅ Aligned
+
+The struct is correct. The architecture states the MUTABLE region holds GoalDependencyGraph entries, and this is exactly what `GoalStateEntry` represents.
+
+**One gap:** The architecture says the MUTABLE region also stores `ContextEnvelope` entries alongside the GoalContract. The architecture text is explicit: *"Each running specialist agent gets a ContextEnvelope — a managed container for everything in its current reasoning context — stored as a MUTABLE_REGION entry alongside the GoalContract."* There is no `ContextEnvelopeEntry` slot defined anywhere in the uploaded files. This is a missing slot — it is not in `mod.rs` and not in any uploaded file. This needs to be added.
+
+---
+
+## `agent_registry.rs` ⚠️ Partially aligned — one structural mismatch
+
+The struct fields are correct. The `heartbeat_ts` as `AtomicU64` is correct.
+
+**Structural problem:** The architecture says the stall threshold is *"p99(call_duration) + 3σ + safety_margin per agent type"* and is *adaptive*, loaded from the HealthPolicy module. The uploaded struct has `status: u8` as a simple enum. There is no field tracking `failure_count` — the architecture says *"A failure counter for the agent type is incremented. At failure count 3 the goal is marked failed."* This counter is not in the struct. Without it, the L1 Health Monitor cannot implement the 3-failure escalation path. The `failure_count` field must be added.
+
+**Size check:** `8 + 1 + 1 + 8 + 8 + 8 + 474 = 508` bytes, not 512. The padding calculation is wrong by 4 bytes. The slab allocator does pointer arithmetic assuming 512-byte slots. This will produce misaligned slot reads starting from slot 2. A compile-time size assert must be added and the `_pad` must be corrected to `[u8; 478]`.
+
+---
+
+## `token_state.rs` ⚠️ Size problem
+
+`4 + 1 + 8 + 8 + 39 = 60` bytes, not 64. The `_pad` should be `[u8; 43]` to reach 64 bytes. Same problem as `agent_registry.rs` — the padding math is off and there is no compile-time size assert to catch it.
+
+---
+
+## `surface_assignments.rs` ⚠️ Size problem
+
+`4 + 8 + 8 + 44 = 64` bytes. This is actually correct. But there is still no compile-time size assert. One field reordering due to `#[repr(C)]` alignment rules could silently change the size.
+
+---
+
+## `capability_map.rs` ⚠️ Size problem and misalignment
+
+`64 + 64 + 1 + 4 + 891 = 1024` bytes. Let me check alignment: `resource_ids: [u32; 16]` is 64 bytes, `resource_count: u8` is 1 byte, `hot_reload_version: u32` is 4 bytes — but `u32` requires 4-byte alignment. After the `u8`, there are 3 implicit padding bytes before `hot_reload_version` in `#[repr(C)]`. This means the actual struct is `64 + 64 + 1 + 3(implicit) + 4 + 891 = 1027` bytes before `_pad` adjustment. The `_pad` size of 891 is calculated without accounting for this implicit padding, making the real struct size wrong. **This is a correctness bug.** The `_pad` must be reduced by 3, or the field order must be reordered to avoid the alignment gap.
+
+---
+
+## `token_debt_ledger.rs` ✅ Aligned
+
+`8 + 8 + 8 + 4 + 8 + 212 = 248` bytes, not 256. The `_pad` must be `[u8; 216]` to reach 256 bytes. Same padding math error. No compile-time assert.
+
+---
+
+## `machine_profile.rs` ✅ Conceptually aligned, but wrong representation
+
+The architecture says the MachineProfile is a *frozen Python dataclass* held via `ArcSwap<Py<PyAny>>` in `MachineProfileStore` — not a Rust struct. The uploaded file defines it as a plain Rust `struct` with `Vec<String>` fields. This is not aligned with the architecture.
+
+The MachineProfile's hot-tier representation has two parts: the capability matrix (raw float32 mmap bytes in COMPUTE region) and the Python frozen dataclass (held via ArcSwap in `machine_profile_store.rs`). The Rust struct in `machine_profile.rs` should be metadata only — `live_app_count`, `captured_at_ns` — not a full description of the profile. The `app_names` and `app_capability_descriptions` as `Vec<String>` will not exist in the mmap — they live in the Python dataclass. This file needs to be restructured.
+
+---
+
+## `hnsw_index.rs` ⚠️ Stub only, not functional
+
+The uploaded file is a stub with no actual `usearch::Index` integration. The `HnswIndexHandle` struct has only `dim` and `capacity` — no actual index. The architecture requires ANN queries over strategy file embeddings. The `#[cfg(feature = "hnsw")]` feature gate is present, but the actual `usearch` integration is missing. This is fine for a skeleton but must be completed before Phase 2 closes.
+
+---
+
+## `embedding_cache.rs` ✅ Aligned
+
+The implementation is correctly aligned — `DashMap<u128, CacheEntry>` with `LruCache` inside a `Mutex` for eviction ordering, `xxh3_128` keying, 1024 entry cap.
+
+**One race condition:** The `get()` method locks the `LruCache` to promote the key, but reads from `DashMap` without holding that lock. A concurrent `insert()` could evict the key from `LruCache` and `DashMap` between the `DashMap::get()` returning a reference and the `LruCache::get()` promoting it. The result is a use-after-eviction — the caller holds a reference to a value that has been evicted from the cache. The `DashMap` reference keeps the memory alive (Arc semantics), so this is not a memory safety issue, but the LRU ordering becomes inconsistent. The `get()` and the LRU promotion must be done under the same lock or the promotion must happen before the DashMap lookup.
+
+---
+
+## `capability_matrix.rs` ✅ Correctly empty
+
+This file is intentionally empty. The capability matrix is not a slot — it is a raw mmap region in `ComputeRegion`. This is the correct call made earlier in the conversation.
+
+---
+
+## `mod.rs` ⚠️ Missing slot
+
+`ContextEnvelopeEntry` is not declared and not exported. The architecture requires it in the MUTABLE region. All other slots are correctly declared and exported.
+
+---
+
+## Summary of what needs fixing before implementation begins
+
+| File | Issue | Severity |
+|------|-------|----------|
+| `world_model.rs` | Missing compile-time size assert | Must fix |
+| `agent_registry.rs` | Wrong `_pad` size (474 → 478), missing `failure_count` field | Must fix |
+| `token_state.rs` | Wrong `_pad` size (39 → 43) | Must fix |
+| `token_debt_ledger.rs` | Wrong `_pad` size (212 → 216) | Must fix |
+| `capability_map.rs` | Implicit alignment gap makes struct 1027 not 1024 bytes | Must fix |
+| `machine_profile.rs` | Wrong representation — should be metadata only, not full profile | Must fix |
+| `event_log_buffer.rs` | Wrap-around logic drops events at boundary | Must fix |
+| `hnsw_index.rs` | Stub only, usearch not integrated | Acceptable for now |
+| Missing file | `ContextEnvelopeEntry` not defined anywhere | Must add |
+| All files | No compile-time size asserts on any `#[repr(C)]` struct | Must add to all |
